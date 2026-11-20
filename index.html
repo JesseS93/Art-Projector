@@ -22,7 +22,14 @@
   #world{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:0 0;will-change:transform}
   #world.anim{transition:transform .28s ease}
   #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#111}
-  #pic{position:absolute;left:0;top:0;pointer-events:none;transform-origin:50% 50%;opacity:.5}
+  #pic{position:absolute;left:0;top:0;pointer-events:none;transform-origin:0 0;opacity:.5}
+  #mk{height:44px;padding:0 14px;border-radius:22px;display:none;align-items:center;gap:8px;font-size:13px;font-weight:600}
+  body.camOn #mk{display:flex}
+  #mk i{width:10px;height:10px;border-radius:50%;background:#77736c;flex:none}
+  #mk.found i{background:#3ddc84;box-shadow:0 0 8px #3ddc84}
+  #mk.lost i{background:#ffb020}
+  #mk.pinned{border-color:rgba(61,220,132,.6)}
+  a.chip{color:inherit;text-decoration:none}
   #grid{position:absolute;inset:0;pointer-events:none;display:none;
     background-image:linear-gradient(rgba(255,255,255,.25) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.25) 1px,transparent 1px);
     background-size:33.333% 33.333%}
@@ -118,9 +125,10 @@
     <button class="big" id="startBtn">Turn on camera</button>
     <div id="startErr"></div>
     <ol class="tips">
-      <li>Prop your phone 20–30 cm above the paper, camera pointing down. A glass or a small stand works.</li>
+      <li><a href="marker.html" style="color:var(--accent)">Print the marker strip</a> and tape it across the top of your paper.</li>
+      <li>Prop your phone 20–30 cm above the paper, pointing down, so the camera sees the strip and your drawing area.</li>
       <li>Choose a picture, then move, resize and rotate it with your fingers.</li>
-      <li>Tap <b>Lock</b>. Then pinch to zoom in on detail. The picture stays pinned to the paper.</li>
+      <li>Tap <b>Lock</b>. The picture is now pinned to the paper and follows it if the paper or phone moves. Pinch to zoom in on detail.</li>
     </ol>
   </div>
 </div>
@@ -132,6 +140,7 @@
 
 <!-- zoom badge -->
 <div id="zoomBox" class="ui">
+  <button id="mk" class="panel"><i></i><span id="mkTxt">No marker</span></button>
   <button id="badge" class="panel" title="Zoom out"><span id="zval">1.0×</span><small>tap to zoom out</small></button>
 </div>
 
@@ -176,6 +185,7 @@
       <button class="chip" data-act="wakeT" id="wakeChip">Keep screen on</button>
       <button class="chip" data-act="torch" id="torchChip" style="display:none">Flashlight</button>
       <button class="chip" data-act="resetPic">Reset picture size</button>
+      <a class="chip" href="marker.html">Print marker strip</a>
     </div>
   </div>
 </div>
@@ -224,8 +234,166 @@
 
   // ---------- picture ----------
   function applyPic() {
+    if (pinned && quadS) { setQuad(quadS); return; }
     pic.style.transform =
-      `translate(${P.x - pic.width / 2}px,${P.y - pic.height / 2}px) rotate(${P.r}rad) scale(${P.s})`;
+      `translate(${P.x}px,${P.y}px) rotate(${P.r}rad) scale(${P.s}) translate(${-pic.width / 2}px,${-pic.height / 2}px)`;
+  }
+  // the picture's four corners on screen (world space) from the P transform
+  function quadFromP() {
+    const w = pic.width, h = pic.height, c = Math.cos(P.r) * P.s, s = Math.sin(P.r) * P.s;
+    return [[0, 0], [w, 0], [w, h], [0, h]].map(([x, y]) => {
+      x -= w / 2; y -= h / 2;
+      return [P.x + c * x - s * y, P.y + s * x + c * y];
+    });
+  }
+  function setQuad(q) {
+    const w = pic.width, h = pic.height;
+    const M = homography([[0, 0], [w, 0], [w, h], [0, h]], q);
+    if (!M) return;
+    const m = M.map(v => v / M[8]);
+    pic.style.transform = `matrix3d(${m[0]},${m[3]},0,${m[6]},${m[1]},${m[4]},0,${m[7]},0,0,1,0,${m[2]},${m[5]},0,${m[8]})`;
+  }
+
+  // ---------- homography maths ----------
+  function solve(A, b) {
+    const n = b.length;
+    for (let i = 0; i < n; i++) {
+      let p = i;
+      for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+      [A[i], A[p]] = [A[p], A[i]]; [b[i], b[p]] = [b[p], b[i]];
+      const d = A[i][i]; if (Math.abs(d) < 1e-12) return null;
+      for (let r = i + 1; r < n; r++) {
+        const f = A[r][i] / d; if (!f) continue;
+        for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+        b[r] -= f * b[i];
+      }
+    }
+    const x = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      let s = b[i]; for (let c = i + 1; c < n; c++) s -= A[i][c] * x[c];
+      x[i] = s / A[i][i];
+    }
+    return x;
+  }
+  const mul3 = (A, B) => { const C = new Array(9);
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++)
+      C[r * 3 + c] = A[r * 3] * B[c] + A[r * 3 + 1] * B[3 + c] + A[r * 3 + 2] * B[6 + c];
+    return C; };
+  function inv3(m) {
+    const [a, b, c, d, e, f, g, h, i] = m;
+    const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g, det = a * A + b * B + c * C;
+    if (Math.abs(det) < 1e-12) return null;
+    return [A / det, -(b * i - c * h) / det, (b * f - c * e) / det,
+            B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
+            C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
+  }
+  const apply = (H, p) => { const w = H[6] * p[0] + H[7] * p[1] + H[8];
+    return [(H[0] * p[0] + H[1] * p[1] + H[2]) / w, (H[3] * p[0] + H[4] * p[1] + H[5]) / w]; };
+  function normT(pts) {
+    let cx = 0, cy = 0; pts.forEach(p => { cx += p[0]; cy += p[1]; }); cx /= pts.length; cy /= pts.length;
+    let d = 0; pts.forEach(p => { d += Math.hypot(p[0] - cx, p[1] - cy); }); d = d / pts.length || 1;
+    const s = Math.SQRT2 / d;
+    return { T: [s, 0, -s * cx, 0, s, -s * cy, 0, 0, 1], Ti: [1 / s, 0, cx, 0, 1 / s, cy, 0, 0, 1] };
+  }
+  // least-squares homography (src -> dst), 4 or more point pairs
+  function homography(src, dst) {
+    const ns = normT(src), nd = normT(dst);
+    const A = Array.from({ length: 8 }, () => new Array(8).fill(0)), b = new Array(8).fill(0);
+    for (let i = 0; i < src.length; i++) {
+      const [x, y] = apply(ns.T, src[i]), [u, v] = apply(nd.T, dst[i]);
+      const rows = [[x, y, 1, 0, 0, 0, -u * x, -u * y, u], [0, 0, 0, x, y, 1, -v * x, -v * y, v]];
+      for (const r of rows) for (let j = 0; j < 8; j++) { b[j] += r[j] * r[8]; for (let k = 0; k < 8; k++) A[j][k] += r[j] * r[k]; }
+    }
+    const h = solve(A, b); if (!h) return null;
+    return mul3(mul3(nd.Ti, [...h, 1]), ns.T);
+  }
+
+  // ---------- marker tracking ----------
+  // Board layout of the printed strip (mm): three 35 mm markers, 75 mm apart. Only the
+  // relative layout matters, so printing at any scale works.
+  const BOARD = [0, 1, 2].map(i => [[75 * i, 0], [75 * i + 35, 0], [75 * i + 35, 35], [75 * i, 35]]);
+  const DW = 720;                        // detection image width
+  let worker = null, busy = false, Hcur = null, lastSeen = 0, mkState = '';
+  let pinned = null, target = null, quadS = null;
+  const dcan = document.createElement('canvas');
+  const dctx = dcan.getContext('2d', { willReadFrequently: true });
+
+  function videoToWorld(x, y) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const s = Math.max(W() / vw, H() / vh);
+    return [x * s + (W() - vw * s) / 2, y * s + (H() - vh * s) / 2];
+  }
+  function initTracker() {
+    try {
+      worker = new Worker('tracker-worker.js');
+      worker.onmessage = onDetect;
+      worker.onerror = () => { worker = null; setMk('off'); };
+    } catch (e) { worker = null; }
+    if (!worker) setMk('off');
+    requestAnimationFrame(tick);
+  }
+  function tick() {
+    requestAnimationFrame(tick);
+    // ease the pinned picture toward the latest tracked position
+    if (pinned && target) {
+      if (!quadS) quadS = target.map(p => p.slice());
+      for (let i = 0; i < 4; i++) {
+        const dx = target[i][0] - quadS[i][0], dy = target[i][1] - quadS[i][1], d = Math.hypot(dx, dy);
+        const a = d < 0.8 ? 0.06 : d < 4 ? 0.22 : Math.min(1, 0.3 + (d - 4) / 25);
+        quadS[i][0] += dx * a; quadS[i][1] += dy * a;
+      }
+      setQuad(quadS);
+    }
+    if (performance.now() - lastSeen > 700 && mkState === 'found') setMk(pinned ? 'lost' : 'none');
+    if (!worker || busy || video.readyState < 2 || !video.videoWidth) return;
+    const vw = video.videoWidth, vh = video.videoHeight, k = Math.min(1, DW / Math.max(vw, vh));
+    const w = Math.round(vw * k), h = Math.round(vh * k);
+    if (dcan.width !== w || dcan.height !== h) { dcan.width = w; dcan.height = h; }
+    dctx.drawImage(video, 0, 0, w, h);
+    const img = dctx.getImageData(0, 0, w, h);
+    busy = true;
+    worker.postMessage({ w, h, k, buf: img.data.buffer }, [img.data.buffer]);
+  }
+  function onDetect(e) {
+    busy = false;
+    const { markers, k } = e.data, src = [], dst = [];
+    for (const m of markers) {
+      const b = BOARD[m.id]; if (!b) continue;
+      m.c.forEach((p, i) => { src.push(b[i]); dst.push(videoToWorld(p[0] / k, p[1] / k)); });
+    }
+    if (src.length < 4) return;
+    const Hn = homography(src, dst); if (!Hn) return;
+    Hcur = Hn; lastSeen = performance.now();
+    setMk('found');
+    if (pinned) target = pinned.map(p => apply(Hcur, p));
+  }
+  function setMk(s) {
+    if (s === mkState) return; mkState = s;
+    const el = $('#mk');
+    el.className = 'panel' + (s === 'found' ? ' found' : s === 'lost' ? ' lost' : '') + (pinned ? ' pinned' : '');
+    $('#mkTxt').textContent = s === 'found' ? (pinned ? 'Pinned to paper' : 'Marker found')
+      : s === 'lost' ? 'Marker hidden' : s === 'off' ? 'Tracking off' : 'No marker';
+  }
+  const markerVisible = () => Hcur && performance.now() - lastSeen < 500;
+  function pinToPaper() {
+    const Hi = inv3(Hcur); if (!Hi) return false;
+    pinned = quadFromP().map(p => apply(Hi, p));
+    target = quadFromP(); quadS = target.map(p => p.slice());
+    mkState = ''; setMk('found');
+    return true;
+  }
+  function unpin() {
+    if (pinned && quadS) {                 // carry the current on-screen position back into P
+      const q = quadS;
+      P.x = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
+      P.y = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
+      P.r = Math.atan2(q[1][1] - q[0][1], q[1][0] - q[0][0]);
+      P.s = (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) / pic.width
+           + Math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]) / pic.height) / 2;
+    }
+    pinned = null; target = null; quadS = null;
+    const s = mkState; mkState = ''; setMk(s);
+    applyPic();
   }
   function fitPic(keepPos) {
     if (!src) return;
@@ -299,7 +467,7 @@
       URL.revokeObjectURL(url);
       src = c;
       body.classList.remove('noPic');
-      if (locked) setLocked(false);
+      if (locked) { unpin(); setLocked(false, true); }
       render(); fitPic();
       view.s = 1; applyView(true);
       toast('Drag, pinch and twist to line it up. Then tap Lock.', 3600);
@@ -307,15 +475,19 @@
   }
 
   // ---------- lock ----------
-  function setLocked(v) {
+  function setLocked(v, quiet) {
     locked = v;
     $('#lockBtn').classList.toggle('locked', v);
     $('#lockTxt').textContent = v ? 'Adjust' : 'Lock';
     $('#lockIco').innerHTML = v
       ? '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>'
       : '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>';
-    if (v) { toast('Locked. Pinch to zoom in on detail. Double-tap to zoom in or out.', 3400); requestWake(); }
-    else toast('Adjust mode: move the picture with your fingers.');
+    if (quiet) return;
+    if (v) {
+      requestWake();
+      toast(pinned ? 'Pinned to the paper. It will follow the marker strip. Pinch to zoom in on detail.'
+                   : "No marker strip in view, so the picture is locked to the screen. Don't move the phone or paper.", 4200);
+    } else toast('Adjust mode: move the picture with your fingers.');
   }
 
   // ---------- gestures ----------
@@ -400,6 +572,8 @@
       video.srcObject = stream;
       await video.play().catch(() => {});
       $('#start').style.display = 'none';
+      body.classList.add('camOn');
+      if (!worker) initTracker();
       const track = stream.getVideoTracks()[0];
       const caps = track.getCapabilities ? track.getCapabilities() : {};
       if (caps.torch) $('#torchChip').style.display = '';
@@ -430,7 +604,11 @@
   // ---------- buttons ----------
   const acts = {
     pick: () => $('#file').click(),
-    lock: () => { if (!src) { toast('Choose a picture first.'); return; } setLocked(!locked); },
+    lock: () => {
+      if (!src) { toast('Choose a picture first.'); return; }
+      if (locked) { unpin(); setLocked(false); }
+      else { if (markerVisible()) pinToPaper(); setLocked(true); }
+    },
     flip: () => { flip = !flip; $('#flipBtn').classList.toggle('on', flip); render(); },
     fit: () => { view.s = 1; applyView(true); if (src && !locked) { fitPic(); } },
     resetPic: () => { if (locked) { toast('Tap Adjust first to change the picture.'); return; } fitPic(true); },
@@ -457,6 +635,10 @@
     const b = e.target.closest('[data-act]'); if (b && acts[b.dataset.act]) acts[b.dataset.act]();
   });
   $('#badge').addEventListener('click', () => { view.s = 1; applyView(true); });
+  $('#mk').addEventListener('click', () => toast(
+    mkState === 'found' ? (pinned ? 'The picture is following the marker strip on your paper.' : 'Marker strip found. Line up your picture, then tap Lock to pin it to the paper.')
+    : mkState === 'off' ? 'Marker tracking could not start in this browser.'
+    : 'Print the marker strip (More → Print marker strip) and keep it in view at the top of your paper.', 4200));
   $('#startBtn').addEventListener('click', startCam);
   $('#file').addEventListener('change', e => { loadFile(e.target.files[0]); e.target.value = ''; });
   $('#opacity').addEventListener('input', e => { pic.style.opacity = e.target.value / 100; });
